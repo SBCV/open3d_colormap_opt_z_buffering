@@ -10,25 +10,27 @@ USE_Z_BUFFERING = True
 
 
 def get_file_list(dir, extension):
-    _, _, filenames = os.walk(dir).next()
+    _, _, filenames = next(os.walk(dir))
     ext = extension[1:]
     filenames = [fn for fn in filenames if fn.split('.')[-1] == ext]
     return sorted(filenames)
 
 
-def save_depth_maps(mesh, intrinsic, extrinsics, filenames):
+def save_depth_maps(mesh, camera_trajectory, filenames):
   glb = save_depth_maps
   glb.index = -1
+
+  intrinsic = camera_trajectory.parameters[0].intrinsic
 
   # intrinsics assumed by the renderer - corrected later
   cx = intrinsic.width/2.0-0.5
   cy = intrinsic.height/2.0-0.5
   f = max(intrinsic.get_focal_length())
-  glb.intrinsic = open3d.PinholeCameraIntrinsic(intrinsic.width, intrinsic.height,
+  glb.intrinsic = open3d.camera.PinholeCameraIntrinsic(intrinsic.width, intrinsic.height,
     f, f, cx, cy)
-  glb.extrinsics = extrinsics
+  glb.parameters = camera_trajectory.parameters
   glb.filenames = filenames
-  glb.vis = open3d.Visualizer()
+  glb.vis = open3d.visualization.Visualizer()
 
   # affine matrix for correction
   offset_x = intrinsic.get_principal_point()[0] - \
@@ -52,9 +54,8 @@ def save_depth_maps(mesh, intrinsic, extrinsics, filenames):
       cv2.imwrite(glb.filenames[glb.index], np.uint16(np.asarray(depth) * 1000))
 
     glb.index = glb.index + 1
-    if glb.index < len(glb.extrinsics):
-      ctr.convert_from_pinhole_camera_parameters(glb.intrinsic,
-        glb.extrinsics[glb.index])
+    if glb.index < len(glb.parameters):
+      ctr.convert_from_pinhole_camera_parameters(glb.parameters[glb.index])
     else:
       glb.vis.register_animation_callback(None)
     return False
@@ -68,29 +69,29 @@ def save_depth_maps(mesh, intrinsic, extrinsics, filenames):
 
 
 if __name__ == "__main__":
-    open3d.set_verbosity_level(open3d.VerbosityLevel.Debug)
+    open3d.utility.set_verbosity_level(open3d.utility.VerbosityLevel.Debug)
 
     # Read camera pose and mesh
-    camera = open3d.read_pinhole_camera_trajectory(os.path.join(path, "scene/key.log"))
-    mesh = open3d.read_triangle_mesh(os.path.join(path, "scene", "integrated.ply"))
+    camera_trajectory = open3d.io.read_pinhole_camera_trajectory(os.path.join(path, "scene/key.log"))
+    mesh = open3d.io.read_triangle_mesh(os.path.join(path, "scene", "integrated.ply"))
 
     color_image_path = get_file_list(
-            os.path.join(path, "image/"), extension = ".jpg")
+            os.path.join(path, "image/"), extension=".jpg")
 
     if USE_Z_BUFFERING:
       depth_image_path = [osp.join('/tmp', fn.replace('jpg', 'png'))
         for fn in color_image_path]
       # generate depth maps
-      save_depth_maps(mesh, camera.intrinsic, np.asarray(camera.extrinsic),
-        depth_image_path)
+      save_depth_maps(mesh, camera_trajectory,
+                      depth_image_path)
     else:
       depth_filenames = get_file_list(
-        os.path.join(path, "depth/"), extension = ".png")
+        os.path.join(path, "depth/"), extension=".png")
       depth_image_path = []
 
       # add artificial noise to the depth maps
       for i in range(len(depth_filenames)):
-        depth = open3d.read_image(osp.join(path, 'depth', depth_filenames[i]))
+        depth = open3d.io.read_image(osp.join(path, 'depth', depth_filenames[i]))
         depth = np.asarray(depth, dtype=np.float)
         depth += 50*np.random.rand(*depth.shape)
         tmp_filename = osp.join('/tmp', 'depth_{:s}'.format(depth_filenames[i]))
@@ -101,23 +102,22 @@ if __name__ == "__main__":
     # Read RGBD images
     rgbd_images = []
     for i in range(len(depth_image_path)):
-        depth = open3d.read_image(depth_image_path[i])
-        color = open3d.read_image(os.path.join(path, 'image', color_image_path[i]))
-        rgbd_image = open3d.create_rgbd_image_from_color_and_depth(color, depth,
-                convert_rgb_to_intensity = False)
+        depth = open3d.io.read_image(depth_image_path[i])
+        color = open3d.io.read_image(os.path.join(path, 'image', color_image_path[i]))
+        rgbd_image = open3d.geometry.RGBDImage.create_from_color_and_depth(color, depth, convert_rgb_to_intensity=False)
         if debug_mode:
-            pcd = open3d.create_point_cloud_from_rgbd_image(rgbd_image,
-                    open3d.PinholeCameraIntrinsic(open3d.PinholeCameraIntrinsicParameters.PrimeSenseDefault))
-            open3d.draw_geometries([pcd])
+            pcd = open3d.geometry.RGBDImage.create_from_color_and_depth(rgbd_image,
+                    open3d.camera.PinholeCameraIntrinsic(open3d.camera.PinholeCameraIntrinsicParameters.PrimeSenseDefault))
+            open3d.visualization.draw_geometries([pcd])
         rgbd_images.append(rgbd_image)
 
     # Before full optimization, let's just visualize texture map
     # with given geometry, RGBD images, and camera poses.
-    option = open3d.ColorMapOptmizationOption()
+    option = open3d.color_map.ColorMapOptimizationOption()
     option.maximum_iteration = 0
-    open3d.color_map_optimization(mesh, rgbd_images, camera, option)
-    open3d.draw_geometries([mesh])
-    open3d.write_triangle_mesh(os.path.join(path, "scene",
+    open3d.color_map.color_map_optimization(mesh, rgbd_images, camera_trajectory, option)
+    open3d.visualization.draw_geometries([mesh])
+    open3d.io.write_triangle_mesh(os.path.join(path, "scene",
         "color_map_before_optimization.ply"), mesh)
 
     # Optimize texture and save the mesh as texture_mapped.ply
@@ -127,7 +127,7 @@ if __name__ == "__main__":
     # SIGGRAPH 2014
     option.maximum_iteration = 300
     option.non_rigid_camera_coordinate = False
-    open3d.color_map_optimization(mesh, rgbd_images, camera, option)
-    open3d.draw_geometries([mesh])
-    open3d.write_triangle_mesh(os.path.join(path, "scene",
+    open3d.color_map.color_map_optimization(mesh, rgbd_images, camera_trajectory, option)
+    open3d.visualization.draw_geometries([mesh])
+    open3d.io.write_triangle_mesh(os.path.join(path, "scene",
         "color_map_after_optimization.ply"), mesh)
